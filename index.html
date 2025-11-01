@@ -1,0 +1,325 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>Anonymous Book Club Poll</title>
+<style>
+body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;background:linear-gradient(135deg,#667eea 0%,#764ba2 100%);min-height:100vh;padding:15px;display:flex;justify-content:center;align-items:center}
+.container{background:#fff;border-radius:16px;box-shadow:0 20px 60px rgba(0,0,0,.3);max-width:720px;width:100%;padding:28px}
+h1{margin:0 0 8px;color:#333}
+.subtitle{color:#666;margin-bottom:20px;white-space:pre-line}
+.hidden{display:none}
+label{display:block;margin:12px 0 6px;color:#555;font-weight:600}
+input[type="text"],input[type="password"],textarea{width:100%;padding:12px;border:2px solid #e0e0e0;border-radius:8px;font-size:16px}
+button{background:#667eea;color:#fff;border:none;padding:12px 18px;border-radius:8px;cursor:pointer;font-weight:600}
+button:hover{background:#5568d3}
+.vote-option{background:#f8f9fa;padding:14px;border-radius:8px;margin-bottom:10px;border:2px solid transparent;cursor:pointer}
+.vote-option.selected{background:#e7eaff;border-color:#667eea}
+.poll-status{background:#ffeaa7;padding:12px;border-radius:8px;margin:12px 0;font-weight:600;color:#2d3436}
+.poll-status.closed{background:#fd79a8;color:#fff}
+.result-item{margin:12px 0}
+.result-label{display:flex;justify-content:space-between;margin-bottom:6px;font-weight:600}
+.result-bar{background:#e0e0e0;height:26px;border-radius:13px;overflow:hidden}
+.result-fill{background:linear-gradient(90deg,#667eea 0%,#764ba2 100%);height:100%;display:flex;align-items:center;justify-content:flex-end;padding-right:8px;color:#fff;font-weight:700;font-size:13px}
+.message{padding:12px;border-radius:8px;margin:12px 0}
+.message.success{background:#d4edda;color:#155724}
+.message.info{background:#d1ecf1;color:#0c5460}
+.admin-box{background:#f8f9fa;border-radius:10px;padding:12px;margin-top:16px}
+.mono{font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,"Liberation Mono","Courier New",monospace}
+.flex{display:flex;gap:8px;flex-wrap:wrap}
+</style>
+</head>
+<body>
+<div class="container">
+  <!-- CREATE MODE (no poll param) -->
+  <section id="createSection" class="">
+    <h1>Create Your Poll</h1>
+    <p class="subtitle">Set up an anonymous poll for your book club.</p>
+
+    <label>Admin Password (required)</label>
+    <input type="password" id="adminPassword" placeholder="Create a password to manage this poll" />
+
+    <label>Poll Question</label>
+    <input type="text" id="pollQuestion" value="What book should we read next?" />
+
+    <label>Poll Description (optional)</label>
+    <textarea id="pollDescription">Voting Rules:
+• Cast ONE vote for your preferred book
+• Results are hidden until voting closes
+• If no book receives over 50% of votes, the top 2 books will go to a runoff
+• In the runoff, simple majority wins</textarea>
+
+    <label>Poll Options</label>
+    <div id="optionsList"></div>
+    <div class="flex">
+      <button id="addOptionBtn">+ Add Option</button>
+      <button id="createBtn">Create Poll</button>
+    </div>
+
+    <div id="createResult" class="admin-box hidden">
+      <h3>🔐 Save This</h3>
+      <p>Your admin password is <strong class="mono" id="pwEcho"></strong></p>
+      <p>Share this link with voters:</p>
+      <div class="mono" id="shareLink" style="word-break:break-all;border:2px solid #495057;padding:8px;border-radius:8px"></div>
+      <div class="flex" style="margin-top:8px">
+        <button id="copyLinkBtn">Copy Link</button>
+        <a id="openVoteLink" target="_blank"><button type="button">Open Voting Page</button></a>
+      </div>
+    </div>
+  </section>
+
+  <!-- VOTE MODE (has ?poll=UUID) -->
+  <section id="voteSection" class="hidden">
+    <h1 id="votingQuestion"></h1>
+    <p id="votingDescription" class="subtitle"></p>
+    <div id="status" class="poll-status">Poll is currently open for voting</div>
+    <div id="votingOptions"></div>
+    <button id="submitVoteBtn" disabled>Submit Vote</button>
+
+    <div class="admin-box">
+      <div class="flex">
+        <input type="password" id="adminPwForClose" placeholder="Admin password to close poll" />
+        <button id="closePollBtn">Close Poll & Show Results</button>
+      </div>
+    </div>
+  </section>
+
+  <!-- RESULTS -->
+  <section id="resultsSection" class="hidden">
+    <h1 id="resultsQuestion"></h1>
+    <p id="resultsDescription" class="subtitle"></p>
+    <div class="poll-status closed">Poll is closed</div>
+    <div id="resultsList"></div>
+    <p id="resultsVoteCount" style="color:#666"></p>
+  </section>
+</div>
+
+<script type="module">
+/** Your Supabase project values (provided by you) */
+const SUPABASE_URL = "https://yffnsqsmhrnknvgueugn.supabase.co";      // root URL is fine
+const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InlmZm5zcXNtaHJua252Z3VldWduIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjE5NzM5MDAsImV4cCI6MjA3NzU0OTkwMH0.e2GnZwArmu2GmLn6NJOAkgfaj3MRPVvzaj1cE5gkL-4";
+
+/** Supabase REST helper (no extra libraries) */
+async function sbFetch(path, { method = 'GET', headers = {}, body } = {}) {
+  const url = `${SUPABASE_URL}/rest/v1${path}`;
+  const res = await fetch(url, {
+    method,
+    headers: {
+      apikey: SUPABASE_ANON_KEY,
+      Authorization: `Bearer ${SUPABASE_ANON_KEY}`,
+      'Content-Type': 'application/json',
+      Prefer: 'return=representation',
+      ...headers
+    },
+    body: body ? JSON.stringify(body) : undefined
+  });
+  if (!res.ok) throw new Error(`${res.status} ${await res.text()}`);
+  return res;
+}
+
+async function sha256(text) {
+  const enc = new TextEncoder().encode(text);
+  const hash = await crypto.subtle.digest('SHA-256', enc);
+  return Array.from(new Uint8Array(hash)).map(b => b.toString(16).padStart(2, '0')).join('');
+}
+
+/** DOM helpers */
+const $ = s => document.querySelector(s);
+const createEl = (tag, props = {}, html = '') => { const el = document.createElement(tag); Object.assign(el, props); if (html) el.innerHTML = html; return el; };
+
+/** URL mode */
+const url = new URL(location.href);
+const pollId = url.searchParams.get('poll');
+
+const createSection = $('#createSection');
+const voteSection   = $('#voteSection');
+const resultsSection= $('#resultsSection');
+
+if (pollId) {
+  createSection.classList.add('hidden');
+  initVoteMode(pollId);
+} else {
+  voteSection.classList.add('hidden');
+  resultsSection.classList.add('hidden');
+  initCreateMode();
+}
+
+/** CREATE MODE */
+function initCreateMode() {
+  const optsDiv = $('#optionsList');
+  const defaultBooks = [
+    "North Woods - Daniel Mason",
+    "The Sound and the Fury - William Faulkner",
+    "Angle of Repose - Wallace Stegner",
+    "Kafka on the Shore - Haruki Murakami",
+    "The Master and Margarita - Mikhail Bulgakov",
+  ];
+  function addOptionRow(text='') {
+    const row = createEl('div');
+    const input = createEl('input', { type:'text', value:text, placeholder:'Option' });
+    const remove = createEl('button', { type:'button', onclick: () => row.remove() }, 'Remove');
+    remove.style.background = '#ff4757';
+    row.append(input, remove);
+    optsDiv.append(row);
+  }
+  defaultBooks.forEach(addOptionRow);
+  $('#addOptionBtn').onclick = () => addOptionRow('');
+
+  $('#createBtn').onclick = async () => {
+    const pw = $('#adminPassword').value.trim();
+    const question = $('#pollQuestion').value.trim();
+    const description = $('#pollDescription').value.trim();
+    const options = Array.from(optsDiv.querySelectorAll('input[type=text]')).map(i => i.value.trim()).filter(Boolean);
+
+    if (!pw) { alert('Please enter an admin password.'); return; }
+    if (!question) { alert('Please enter a question.'); return; }
+    if (options.length < 2) { alert('Add at least 2 options.'); return; }
+
+    try {
+      const hash = await sha256(pw);
+
+      // create poll
+      const r1 = await sbFetch('/polls', { method:'POST', body:{
+        question, description, is_open: true, admin_password_hash: hash
+      }});
+      const [{ id }] = await r1.json();
+
+      // insert options
+      const rows = options.map(text => ({ poll_id: id, text }));
+      await sbFetch('/options', { method:'POST', body: rows });
+
+      // show share link
+      const link = `${location.origin}${location.pathname}?poll=${id}`;
+      $('#pwEcho').textContent = pw;
+      $('#shareLink').textContent = link;
+      $('#openVoteLink').href = link;
+      $('#createResult').classList.remove('hidden');
+      alert('Poll created! Share the link with your group.');
+    } catch (e) {
+      console.error(e);
+      alert('Error creating poll: ' + e.message);
+    }
+  };
+
+  $('#copyLinkBtn').onclick = async () => {
+    const link = $('#shareLink').textContent;
+    try { await navigator.clipboard.writeText(link); alert('Link copied!'); }
+    catch { alert('Copy failed. Please copy manually.'); }
+  };
+}
+
+/** VOTE MODE */
+async function initVoteMode(id) {
+  try {
+    // fetch poll + options
+    const pRes = await sbFetch(`/polls?id=eq.${id}&select=*`);
+    const polls = await pRes.json();
+    if (!polls.length) { alert('Poll not found.'); return; }
+    const poll = polls[0];
+
+    const oRes = await sbFetch(`/options?poll_id=eq.${id}&select=*`);
+    const options = await oRes.json();
+
+    if (poll.is_open) {
+      showVoting(poll, options);
+    } else {
+      showResults(poll, options);
+    }
+  } catch (e) {
+    console.error(e);
+    alert('Error loading poll: ' + e.message);
+  }
+}
+
+function showVoting(poll, options) {
+  $('#votingQuestion').textContent = poll.question;
+  $('#votingDescription').textContent = poll.description || '';
+  $('#status').textContent = 'Poll is currently open for voting';
+
+  const list = $('#votingOptions');
+  list.innerHTML = '';
+  let selected = null;
+  options.forEach((opt) => {
+    const div = createEl('div', { className:'vote-option' }, `
+      <input type="radio" name="vote" value="${opt.id}" style="margin-right:8px">
+      <label style="cursor:pointer">${opt.text}</label>
+    `);
+    div.onclick = () => {
+      list.querySelectorAll('.vote-option').forEach(d => d.classList.remove('selected'));
+      div.classList.add('selected');
+      selected = opt.id;
+      $('#submitVoteBtn').disabled = false;
+    };
+    list.appendChild(div);
+  });
+
+  $('#submitVoteBtn').onclick = async () => {
+    if (!selected) { alert('Please select an option.'); return; }
+    try {
+      await sbFetch('/votes', { method:'POST', body:{ poll_id: poll.id, option_id: selected }});
+      list.innerHTML = `<div class="message success"><strong>Thank you for voting!</strong><br>Your vote has been recorded anonymously. Results will appear when the poll closes.</div>`;
+      $('#submitVoteBtn').disabled = true;
+    } catch (e) {
+      console.error(e);
+      alert('Error submitting vote: ' + e.message);
+    }
+  };
+
+  $('#closePollBtn').onclick = async () => {
+    const entered = $('#adminPwForClose').value.trim();
+    if (!entered) { alert('Enter admin password to close.'); return; }
+    const hash = await sha256(entered);
+    if (!confirm('Close the poll and show results?')) return;
+    try {
+      // verify password by comparing stored hash
+      const pRes = await sbFetch(`/polls?id=eq.${poll.id}&select=admin_password_hash`);
+      const [{ admin_password_hash }] = await pRes.json();
+      if (hash !== admin_password_hash) { alert('Incorrect password.'); return; }
+      await sbFetch(`/polls?id=eq.${poll.id}`, { method:'PATCH', body:{ is_open:false }});
+      initVoteMode(poll.id); // reload into results mode
+      voteSection.classList.add('hidden');
+    } catch (e) {
+      console.error(e);
+      alert('Error closing poll: ' + e.message);
+    }
+  };
+
+  voteSection.classList.remove('hidden');
+  resultsSection.classList.add('hidden');
+}
+
+async function showResults(poll, options) {
+  $('#resultsQuestion').textContent = poll.question;
+  $('#resultsDescription').textContent = poll.description || '';
+
+  // tally
+  const vRes = await sbFetch(`/votes?poll_id=eq.${poll.id}&select=option_id`);
+  const votes = await vRes.json();
+  const total = votes.length;
+
+  const counts = Object.fromEntries(options.map(o => [o.id, 0]));
+  votes.forEach(v => { counts[v.option_id] = (counts[v.option_id] || 0) + 1; });
+
+  const list = $('#resultsList');
+  list.innerHTML = '';
+  let top = { text:'', votes: -1, pct: 0 };
+  options.forEach(opt => {
+    const c = counts[opt.id] || 0;
+    const pct = total ? Math.round((c / total) * 100) : 0;
+    if (c > top.votes) top = { text: opt.text, votes: c, pct };
+    const item = createEl('div', { className:'result-item' });
+    item.innerHTML = `
+      <div class="result-label"><span>${opt.text}</span><span>${c} votes</span></div>
+      <div class="result-bar"><div class="result-fill" style="width:${pct}%">${pct}%</div></div>
+    `;
+    list.appendChild(item);
+  });
+
+  $('#resultsVoteCount').textContent = `Total votes: ${total}`;
+  voteSection.classList.add('hidden');
+  resultsSection.classList.remove('hidden');
+}
+</script>
+</body>
+</html>
