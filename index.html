@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width,initial-scale=1" />
-<title>Anonymous Book Club Poll</title>
+<title>Anonymous Book Club Poll (with Auto-Runoff)</title>
 <style>
 body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;background:linear-gradient(135deg,#667eea 0%,#764ba2 100%);min-height:100vh;padding:15px;display:flex;justify-content:center;align-items:center}
 .container{background:#fff;border-radius:16px;box-shadow:0 20px 60px rgba(0,0,0,.3);max-width:720px;width:100%;padding:28px}
@@ -96,11 +96,11 @@ button:hover{background:#5568d3}
 </div>
 
 <script type="module">
-/** Your Supabase project values (provided by you) */
-const SUPABASE_URL = "https://yffnsqsmhrnknvgueugn.supabase.co";      // root URL is fine
+/** Your Supabase project values */
+const SUPABASE_URL = "https://yffnsqsmhrnknvgueugn.supabase.co";
 const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InlmZm5zcXNtaHJua252Z3VldWduIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjE5NzM5MDAsImV4cCI6MjA3NzU0OTkwMH0.e2GnZwArmu2GmLn6NJOAkgfaj3MRPVvzaj1cE5gkL-4";
 
-/** Supabase REST helper (no extra libraries) */
+/** Supabase REST helper */
 async function sbFetch(path, { method = 'GET', headers = {}, body } = {}) {
   const url = `${SUPABASE_URL}/rest/v1${path}`;
   const res = await fetch(url, {
@@ -266,18 +266,31 @@ function showVoting(poll, options) {
     }
   };
 
+  // Auto-runoff capable close handler
   $('#closePollBtn').onclick = async () => {
     const entered = $('#adminPwForClose').value.trim();
     if (!entered) { alert('Enter admin password to close.'); return; }
     const hash = await sha256(entered);
     if (!confirm('Close the poll and show results?')) return;
     try {
-      // verify password by comparing stored hash
+      // verify password
       const pRes = await sbFetch(`/polls?id=eq.${poll.id}&select=admin_password_hash`);
       const [{ admin_password_hash }] = await pRes.json();
       if (hash !== admin_password_hash) { alert('Incorrect password.'); return; }
+
+      // close current poll
       await sbFetch(`/polls?id=eq.${poll.id}`, { method:'PATCH', body:{ is_open:false }});
-      initVoteMode(poll.id); // reload into results mode
+
+      // try to create automatic runoff if needed
+      const runoffLink = await createRunoffIfNeeded(poll, options, admin_password_hash);
+      if (runoffLink) {
+        alert('No majority reached. A runoff poll was created automatically. Share this link:\n\n' + runoffLink);
+        // Optionally redirect:
+        // location.href = runoffLink;
+      }
+
+      // reload to results for this poll
+      initVoteMode(poll.id);
       voteSection.classList.add('hidden');
     } catch (e) {
       console.error(e);
@@ -287,6 +300,53 @@ function showVoting(poll, options) {
 
   voteSection.classList.remove('hidden');
   resultsSection.classList.add('hidden');
+}
+
+/** Auto-runoff helper */
+async function createRunoffIfNeeded(poll, options, adminHash) {
+  // fetch votes
+  const vRes = await sbFetch(`/votes?poll_id=eq.${poll.id}&select=option_id`);
+  const votes = await vRes.json();
+  const total = votes.length;
+  if (!total || options.length < 2) return null;
+
+  // count votes
+  const counts = Object.fromEntries(options.map(o => [o.id, 0]));
+  votes.forEach(v => { counts[v.option_id] = (counts[v.option_id] || 0) + 1; });
+
+  // check if any option > 50%
+  let majority = false;
+  options.forEach(o => {
+    const pct = Math.round(((counts[o.id] || 0) / total) * 100);
+    if (pct > 50) majority = true;
+  });
+  if (majority) return null; // no runoff needed
+
+  // pick top two
+  const ranked = options
+    .map(o => ({ id: o.id, text: o.text, votes: counts[o.id] || 0 }))
+    .sort((a, b) => b.votes - a.votes);
+  const top2 = ranked.slice(0, 2);
+
+  // create new poll
+  const r1 = await sbFetch('/polls', {
+    method: 'POST',
+    body: {
+      question: `Runoff: ${poll.question}`,
+      description: 'Automatic runoff between the top two choices from the first round.',
+      is_open: true,
+      admin_password_hash: adminHash
+    }
+  });
+  const [{ id: newPollId }] = await r1.json();
+
+  // add two options
+  await sbFetch('/options', {
+    method: 'POST',
+    body: top2.map(t => ({ poll_id: newPollId, text: t.text }))
+  });
+
+  return `${location.origin}${location.pathname}?poll=${newPollId}`;
 }
 
 async function showResults(poll, options) {
